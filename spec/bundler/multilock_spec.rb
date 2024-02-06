@@ -138,6 +138,16 @@ describe "Bundler::Multilock" do
     end
   end
 
+  it "allows multiple parents" do
+    with_gemfile(<<~RUBY) do
+      lockfile("base1")
+      lockfile("base2")
+      lockfile("full", parent: ["base1", "base2"])
+    RUBY
+      invoke_bundler("install")
+    end
+  end
+
   it "generates custom lockfiles with varying versions" do
     with_gemfile(<<~RUBY) do
       lockfile do
@@ -325,6 +335,37 @@ describe "Bundler::Multilock" do
       expect(six_oh).to include("6.0")
       # alt is the same as 6.0, even though it should allow 6.1
       expect(alt).to eq six_oh
+    end
+  end
+
+  it "syncs from multiple parent lockfiles" do
+    with_gemfile(<<~RUBY) do
+      lockfile do
+        gem "minitest", "5.22.0"
+      end
+
+      lockfile("alt1") do
+        gem "concurrent-ruby", "1.2.0"
+      end
+
+      lockfile("final", parent: [nil, "alt1"]) do
+        gem "minitest", ">= 5.1"
+        gem "concurrent-ruby", "~> 1.2"
+      end
+    RUBY
+      invoke_bundler("install")
+
+      default = invoke_bundler("info activesupport")
+      final = invoke_bundler("info activesupport 2> /dev/null", env: { "BUNDLE_LOCKFILE" => "final" })
+
+      expect(default).to include("6.1")
+      expect(final).to include("6.1")
+
+      alt1 = invoke_bundler("info concurrent-ruby 2> /dev/null", env: { "BUNDLE_LOCKFILE" => "alt1" })
+      final = invoke_bundler("info concurrent-ruby 2> /dev/null", env: { "BUNDLE_LOCKFILE" => "final" })
+
+      expect(alt1).to include("1.2.0")
+      expect(final).to include("1.2.0")
     end
   end
 

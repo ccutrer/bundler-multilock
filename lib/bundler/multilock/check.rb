@@ -99,30 +99,51 @@ module Bundler
         needs_pin_check = []
         lockfile = LockfileParser.new(lockfile_definition[:lockfile].read)
         lockfile_path = lockfile_definition[:lockfile].relative_path_from(Dir.pwd)
-        parent = lockfile_definition[:parent]
-        load_lockfile(parent)
-        parent_lockfile = lockfiles[parent]
-        unless lockfile.platforms == parent_lockfile.platforms
-          Bundler.ui.error("The platforms in #{lockfile_path} do not match the parent lockfile.")
-          success = false
-        end
-        unless lockfile.bundler_version == parent_lockfile.bundler_version
-          Bundler.ui.error("bundler (#{lockfile.bundler_version}) in #{lockfile_path} " \
-                           "does not match the parent lockfile's version (@#{parent_lockfile.bundler_version}).")
-          success = false
-        end
+        parents = lockfile_definition[:parent]
+        all_parent_reverse_dependencies = {}
 
         reverse_dependencies = cache_reverse_dependencies(lockfile)
-        parent_reverse_dependencies = cache_reverse_dependencies(parent_lockfile)
-
         # look through top-level explicit dependencies for pinned requirements
         if lockfile_definition[:enforce_pinned_additional_dependencies]
           find_pinned_dependencies(proven_pinned, lockfile.dependencies.each_value)
         end
 
+        parents.each do |parent|
+          load_lockfile(parent)
+          parent_lockfile = lockfiles[parent]
+          unless lockfile.platforms == parent_lockfile.platforms
+            Bundler.ui.error("The platforms in #{lockfile_path} do not match the parent lockfile (#{parent}).")
+            success = false
+          end
+          unless lockfile.bundler_version == parent_lockfile.bundler_version
+            Bundler.ui.error("bundler (#{lockfile.bundler_version}) in #{lockfile_path} " \
+                             "does not match the parent lockfile's version " \
+                             "(@#{parent_lockfile.bundler_version} in #{parent}).")
+            success = false
+          end
+
+          all_parent_reverse_dependencies[parent] = cache_reverse_dependencies(parent_lockfile)
+        end
+
         # check for conflicting requirements (and build list of pins, in the same loop)
         lockfile.specs.each do |spec|
-          parent_spec = lockfile_specs[parent][[spec.name, spec.platform]]
+          parent_spec = nil
+          intentionally_mismatched_parent_specs = false
+          selected_parent = nil
+          # search through all the parents, finding the most specific matching spec
+          parents.reverse_each do |parent|
+            parent_spec ||= current_parent_spec = lockfile_specs[parent][[spec.name, spec.platform]]
+            next unless current_parent_spec
+
+            selected_parent ||= parent
+            next if reverse_dependencies[spec.name].satisfied_by?(current_parent_spec.version) ||
+                    all_parent_reverse_dependencies[parent][spec.name].satisfied_by?(spec.version)
+
+            # the version in the parent lockfile cannot possibly satisfy the requirements
+            # in this lockfile, and vice versa, so we assume it's intentional and allow it
+            intentionally_mismatched_parent_specs = true
+            break
+          end
 
           if lockfile_definition[:enforce_pinned_additional_dependencies]
             # look through what this spec depends on, and keep track of all pinned requirements
@@ -133,31 +154,27 @@ module Bundler
 
           next unless parent_spec
 
+          if intentionally_mismatched_parent_specs
+            # we're allowing it to differ from the parent, so pin check requirement comes into play
+            needs_pin_check << spec if lockfile_definition[:enforce_pinned_additional_dependencies]
+            next
+          end
+
           # have to ensure Path sources are relative to their lockfile before comparing
           same_source = if [parent_spec.source, spec.source].grep(Source::Path).length == 2
                           lockfile_definition[:lockfile]
                             .dirname
                             .join(spec.source.path)
                             .ascend
-                            .any?(parent.dirname.join(parent_spec.source.path))
+                            .any?(selected_parent.dirname.join(parent_spec.source.path))
                         else
                           parent_spec.source == spec.source
                         end
-
           next if parent_spec.version == spec.version && same_source
-
-          # the version in the parent lockfile cannot possibly satisfy the requirements
-          # in this lockfile, and vice versa, so we assume it's intentional and allow it
-          unless reverse_dependencies[spec.name].satisfied_by?(parent_spec.version) ||
-                 parent_reverse_dependencies[spec.name].satisfied_by?(spec.version)
-            # we're allowing it to differ from the parent, so pin check requirement comes into play
-            needs_pin_check << spec if lockfile_definition[:enforce_pinned_additional_dependencies]
-            next
-          end
 
           Bundler.ui.error("#{spec}#{spec.git_version} in #{lockfile_path} " \
                            "does not match the parent lockfile's version " \
-                           "(@#{parent_spec.version}#{parent_spec.git_version}); " \
+                           "(@#{parent_spec.version}#{parent_spec.git_version}) in #{selected_parent}; " \
                            "this may be due to a conflicting requirement, which would require manual resolution.")
           success = false
         end
@@ -179,8 +196,9 @@ module Bundler
 
           next if pinned
 
-          Bundler.ui.error("#{spec} in #{lockfile_path} has not been pinned to a specific version,  " \
-                           "which is required since it is not part of the parent lockfile.")
+          Bundler.ui.error("#{spec} in #{lockfile_path} has not been pinned to a specific version, " \
+                           "which is required since it is not part of " \
+                           "#{(parents.length == 1) ? "the parent lockfile" : "any parent lockfiles"}.")
           success = false
         end
 

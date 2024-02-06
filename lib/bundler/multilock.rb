@@ -25,8 +25,9 @@ module Bundler
       # @param active [Boolean]
       #   If this lockfile should be the default (instead of Gemfile.lock)
       #   BUNDLE_LOCKFILE will still override a lockfile tagged as active
-      # @param parent [String] The parent lockfile to sync dependencies from.
+      # @param parent [String, Array<String>] The parent lockfile(s) to sync dependencies from.
       #   Also used for comparing enforce_pinned_additional_dependencies against.
+      #   When an array, the list goes from lowest priority to highest priority.
       # @param enforce_pinned_additional_dependencies [true, false]
       #   If dependencies are present in this lockfile that are not present in the
       #   default lockfile, enforce that they are pinned.
@@ -68,10 +69,16 @@ module Bundler
           raise ArgumentError, "Only one lockfile (#{old_active[:lockfile]}) can be flagged as active"
         end
 
-        parent = expand_lockfile(parent)
-        if parent != Bundler.default_lockfile(force_original: true) &&
-           !lockfile_definitions.find { |definition| definition[:lockfile] == parent }
-          raise ArgumentError, "Parent lockfile #{parent} is not defined"
+        parent ||= [nil]
+        parent = Array(parent).map do |p|
+          p = expand_lockfile(p)
+          if p != Bundler.default_lockfile(force_original: true) &&
+             !lockfile_definitions.find { |definition| definition[:lockfile] == p } &&
+             !p.exist?
+            raise ArgumentError, "Parent lockfile #{p} is not defined"
+          end
+
+          p
         end
 
         lockfile_definitions << (lockfile_def = {
@@ -192,14 +199,15 @@ module Bundler
               Bundler.ui.info("Syncing to #{relative_lockfile}...") if attempts == 1
               synced_any = true
 
-              parent = lockfile_definition[:parent]
-              parent_root = parent.dirname
-              checker.load_lockfile(parent)
-              parent_specs = checker.lockfile_specs[parent]
+              parents = lockfile_definition[:parent]
+              parents.each { |p| checker.load_lockfile(p) }
 
               # adjust locked paths from the parent lockfile to be relative to _this_ gemfile
-              adjusted_parent_lockfile_contents =
-                checker.lockfile_contents[parent].gsub(/PATH\n  remote: ([^\n]+)\n/) do |remote|
+              adjusted_parent_lockfile_contents = Hash.new do |h, parent|
+                parent_root = parent.dirname
+                parent_specs = checker.lockfile_specs[parent]
+
+                contents = checker.lockfile_contents[parent].gsub(/PATH\n  remote: ([^\n]+)\n/) do |remote|
                   remote_path = Pathname.new($1)
                   next remote if remote_path.absolute?
 
@@ -207,53 +215,62 @@ module Bundler
                   remote.sub($1, relative_remote_path)
                 end
 
-              # add a source for the current gem
-              gem_spec = parent_specs[[File.basename(Bundler.root), "ruby"]]
+                # add a source for the current gem
+                gem_spec = parent_specs[[File.basename(Bundler.root), "ruby"]]
 
-              if gem_spec
-                adjusted_parent_lockfile_contents += <<~TEXT
-                  PATH
-                    remote: .
-                    specs:
-                  #{gem_spec.to_lock}
-                TEXT
+                if gem_spec
+                  contents += <<~TEXT
+                    PATH
+                      remote: .
+                      specs:
+                    #{gem_spec.to_lock}
+                  TEXT
+                end
+                h[parent] = contents
               end
 
-              if lockfile_definition[:lockfile].exist?
-                # if the lockfile already exists, "merge" it together
-                parent_lockfile = LockfileParser.new(adjusted_parent_lockfile_contents)
-                lockfile = LockfileParser.new(lockfile_definition[:lockfile].read)
+              # if the lockfile already exists (or there are multiple parent lockfiles), "merge" them together
+              if lockfile_definition[:lockfile].exist? || parents.length > 1
+                lockfiles = parents.dup
+                lockfiles.unshift(lockfile_definition[:lockfile]) if lockfile_definition[:lockfile].exist?
+                lockfile = LockfileParser.new(lockfiles.shift.read)
 
                 dependency_changes = false
-                # replace any duplicate specs with what's in the default lockfile
-                lockfile.specs.map! do |spec|
-                  parent_spec = parent_specs[[spec.name, spec.platform]]
-                  next spec unless parent_spec
+                unlocking_bundler = false
+                lockfiles.each do |parent|
+                  parent_lockfile = LockfileParser.new(adjusted_parent_lockfile_contents[parent])
+                  parent_specs = checker.lockfile_specs[parent]
 
-                  dependency_changes ||= spec != parent_spec
-                  parent_spec
-                end
+                  # replace any duplicate specs with what's in the parent lockfile
+                  lockfile.specs.map! do |spec|
+                    parent_spec = parent_specs[[spec.name, spec.platform]]
+                    next spec unless parent_spec
 
-                lockfile.specs.replace(parent_lockfile.specs + lockfile.specs).uniq!
-                lockfile.sources.replace(parent_lockfile.sources + lockfile.sources).uniq!
-                lockfile.platforms.replace(parent_lockfile.platforms).uniq!
-                # prune more specific platforms
-                lockfile.platforms.delete_if do |p1|
-                  lockfile.platforms.any? do |p2|
-                    p2 != "ruby" && p1 != p2 && MatchPlatform.platforms_match?(p2, p1)
+                    dependency_changes ||= spec != parent_spec
+                    parent_spec
                   end
-                end
-                lockfile.instance_variable_set(:@ruby_version, parent_lockfile.ruby_version)
-                unless lockfile.bundler_version == parent_lockfile.bundler_version
-                  unlocking_bundler = true
-                  lockfile.instance_variable_set(:@bundler_version, parent_lockfile.bundler_version)
+
+                  lockfile.specs.replace(parent_lockfile.specs + lockfile.specs).uniq!
+                  lockfile.sources.replace(parent_lockfile.sources + lockfile.sources).uniq!
+                  lockfile.platforms.replace(parent_lockfile.platforms).uniq!
+                  # prune more specific platforms
+                  lockfile.platforms.delete_if do |p1|
+                    lockfile.platforms.any? do |p2|
+                      p2 != "ruby" && p1 != p2 && MatchPlatform.platforms_match?(p2, p1)
+                    end
+                  end
+                  lockfile.instance_variable_set(:@ruby_version, parent_lockfile.ruby_version)
+                  unless lockfile.bundler_version == parent_lockfile.bundler_version
+                    unlocking_bundler = true
+                    lockfile.instance_variable_set(:@bundler_version, parent_lockfile.bundler_version)
+                  end
                 end
 
                 new_contents = LockfileGenerator.generate(lockfile)
               else
                 # no lockfile? just start out with the parent lockfile's contents to inherit its
                 # locked gems
-                new_contents = adjusted_parent_lockfile_contents
+                new_contents = adjusted_parent_lockfile_contents[parents.first]
               end
 
               had_changes = false
