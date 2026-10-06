@@ -1,7 +1,5 @@
 # frozen_string_literal: true
 
-require "set"
-
 require_relative "cache"
 
 module Bundler
@@ -13,8 +11,12 @@ module Bundler
         end
       end
 
-      def initialize(cache = Cache.new)
+      # @param check_installed [true, false]
+      #   If gems must be installed (not just locked) for a lockfile to be valid.
+      #   `bundle lock` doesn't install anything, so it shouldn't care.
+      def initialize(cache = Cache.new, check_installed: true)
         @cache = cache
+        @check_installed = check_installed
       end
 
       def run(skip_base_checks: false)
@@ -59,7 +61,7 @@ module Bundler
 
           begin
             definition.validate_runtime!
-            not_installed = Bundler.ui.silence { definition.missing_specs }
+            not_installed = @check_installed ? Bundler.ui.silence { definition.missing_specs } : []
           rescue RubyVersionMismatch, GemNotFound, SolveFailure
             next false
           end
@@ -71,6 +73,9 @@ module Bundler
           end
 
           next false unless not_installed.empty?
+          # without checking installed gems, nothing above notices a dependency
+          # that was added to the Gemfile but isn't locked yet
+          next false unless @check_installed || definition.no_resolve_needed?
 
           # cache a sentinel so that we can share a cache regardless of the check_missing_deps argument
           next :missing_deps unless (definition.locked_gems.dependencies.values - definition.dependencies).empty?

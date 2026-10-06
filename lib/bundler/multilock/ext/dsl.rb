@@ -1,7 +1,5 @@
 # frozen_string_literal: true
 
-require "set"
-
 module Bundler
   module Multilock
     module Ext
@@ -16,7 +14,13 @@ module Bundler
           #    themselves
           #  * mark Multilock as loaded once the main gemfile is evaluated
           #    so that they're not loaded multiple times
+          #  * ignore a lockfile that Bundler derived from BUNDLE_LOCKFILE
+          #    before Multilock was loaded
           def evaluate(gemfile, lockfile, unlock)
+            if (env_lockfile = ENV.fetch("BUNDLE_LOCKFILE", nil)) && lockfile.to_s == env_lockfile
+              lockfile = Bundler.default_lockfile(force_original: true)
+            end
+
             builder = new
             builder.eval_gemfile(gemfile, &Multilock.prepare_block) if Multilock.prepare_block
             builder.eval_gemfile(gemfile)
@@ -52,7 +56,7 @@ module Bundler
           if block
             instance_eval(&block)
           else
-            instance_eval(contents.dup.tap { |x| x.untaint if RUBY_VERSION < "2.7" }, @gemfile.to_s, 1)
+            instance_eval(contents.dup, @gemfile.to_s, 1)
           end
         rescue Exception => e # rubocop:disable Lint/RescueException
           message = "There was an error " \
@@ -64,10 +68,10 @@ module Bundler
           @gemfile = original_gemfile
         end
 
-        def lockfile(*args, **kwargs, &)
+        def lockfile(*, **, &)
           return true if Multilock.loaded?
 
-          Multilock.add_lockfile(*args, builder: self, **kwargs, &)
+          Multilock.add_lockfile(*, builder: self, **, &)
         end
       end
     end
