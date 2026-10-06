@@ -786,7 +786,7 @@ describe "Bundler::Multilock" do
       invoke_bundler("binstub rake")
       Bundler.with_unbundled_env do
         ENV["BUNDLE_LOCKFILE"] = "alt2"
-        expect(`bin/rake -v 2>&1`).to match(/Could not locate lockfile "alt2"/)
+        expect(`bin/rake -v 2>&1`).to include('Could not locate lockfile "alt2"')
       ensure
         ENV.delete("BUNDLE_LOCKFILE")
       end

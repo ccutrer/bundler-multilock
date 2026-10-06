@@ -35,7 +35,7 @@ module Bundler
       # @yield
       #   Block executed only when this lockfile is active.
       # @return [true, false] if the lockfile is the active lockfile
-      def add_lockfile(lockfile = nil,
+      def add_lockfile(lockfile = nil, # rubocop:disable Naming/PredicateMethod -- not a predicate
                        builder:,
                        gemfile: nil,
                        active: nil,
@@ -494,7 +494,7 @@ module Bundler
         end
       end
 
-      def inject_specific_preamble(gemfile, gemfiles, injection_point, preamble, add_newline:, match: nil)
+      def inject_specific_preamble(gemfile, gemfiles, injection_point, preamble, add_newline:, match: nil) # rubocop:disable Naming/PredicateMethod -- not a predicate
         # allow either type of quotes
         match ||= Regexp.new(Regexp.escape(preamble).gsub('"', %(["'])))
         return false if gemfiles.any? { |g| match.match?(g) }
