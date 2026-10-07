@@ -16,9 +16,11 @@
 ## Bundler 4 behaviors the code depends on
 
 - Bundler reads `BUNDLE_LOCKFILE` itself, expands it to an absolute path, and sets it for subprocesses. Use
-  `Multilock.env_lockfile`, which ignores the value Bundler set for subprocesses (marked in
-  `BUNDLE_MULTILOCK_GENERATED_LOCKFILE`) and turns a bare name back into a short lockfile name. Don't read
-  `ENV["BUNDLE_LOCKFILE"]` directly.
+  `Multilock.env_lockfile` and `Multilock.env_lockfile_names`. They ignore the value Bundler set for subprocesses
+  (marked in `BUNDLE_MULTILOCK_GENERATED_LOCKFILE`), and recover what the user wrote from
+  `BUNDLER_ORIG_BUNDLE_LOCKFILE` when it matches. In nested bundler commands it can't be recovered, so a bare name
+  in the current directory could be either a path or a short lockfile name. Don't read `ENV["BUNDLE_LOCKFILE"]`
+  directly.
 - Bundler re-registers a path-installed plugin's hooks only when its path changes. After editing hooks in
   `plugins.rb`, delete `.bundle/plugin` and reinstall.
 - Bundler always locks a gem's source variant as a fallback. A precompiled gem's Ruby upper bound never makes a

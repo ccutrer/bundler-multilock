@@ -124,6 +124,61 @@ describe "Bundler::Multilock" do
     end
   end
 
+  it "replaces all of the version constraints even with comments between them" do
+    with_gemfile("") do
+      File.write("Gemfile", <<~RUBY)
+        source "https://rubygems.org"
+
+        plugin "bundler-multilock", "~> 1.2", # legacy major
+               "< 1.5",
+               source: "https://rubygems.org"
+        return unless Plugin.loaded?("bundler-multilock")
+
+        gem "concurrent-ruby", "1.2.2"
+      RUBY
+
+      local_path = Shellwords.escape(File.expand_path("../..", __dir__))
+      invoke_bundler("plugin install bundler-multilock --path=#{local_path}")
+
+      expect(File.read("Gemfile")).to eq(<<~RUBY)
+        source "https://rubygems.org"
+
+        plugin "bundler-multilock", "#{plugin_requirement}",
+               source: "https://rubygems.org"
+        return unless Plugin.loaded?("bundler-multilock")
+
+        gem "concurrent-ruby", "1.2.2"
+      RUBY
+    end
+  end
+
+  it "updates a guard without parentheses, instead of injecting another one" do
+    with_gemfile("") do
+      File.write("Gemfile", <<~RUBY)
+        source "https://rubygems.org"
+
+        plugin 'bundler-multilock', '~> 1.2'
+        return unless Plugin.installed? 'bundler-multilock'
+
+        Plugin.send(:load_plugin, 'bundler-multilock')
+
+        gem 'concurrent-ruby', '1.2.2'
+      RUBY
+
+      local_path = Shellwords.escape(File.expand_path("../..", __dir__))
+      invoke_bundler("plugin install bundler-multilock --path=#{local_path}")
+
+      expect(File.read("Gemfile")).to eq(<<~RUBY)
+        source "https://rubygems.org"
+
+        plugin 'bundler-multilock', '#{plugin_requirement}'
+        return unless Plugin.loaded?('bundler-multilock')
+
+        gem 'concurrent-ruby', '1.2.2'
+      RUBY
+    end
+  end
+
   it "does not inject duplicate plugin load commands when you prefer single quotes" do
     gemfile = <<~RUBY
       # frozen_string_literal: true
@@ -804,6 +859,28 @@ describe "Bundler::Multilock" do
     end
   end
 
+  it "treats an absolute BUNDLE_LOCKFILE as a path, even without a .lock suffix" do
+    with_gemfile(<<~RUBY) do
+      lockfile do
+        gem "concurrent-ruby", "1.2.2"
+      end
+
+      lockfile "./custom" do
+        gem "concurrent-ruby", "1.3.4"
+      end
+
+      lockfile "custom" do
+        gem "concurrent-ruby", "1.3.3"
+      end
+    RUBY
+      invoke_bundler("install")
+
+      expect(invoke_bundler("info concurrent-ruby", env: { "BUNDLE_LOCKFILE" => File.expand_path("custom") }))
+        .to include("1.3.4")
+      expect(invoke_bundler("info concurrent-ruby", env: { "BUNDLE_LOCKFILE" => "custom" })).to include("1.3.3")
+    end
+  end
+
   it "respects BUNDLE_LOCKFILE in a bundler command nested inside `bundle exec`" do
     with_gemfile(<<~RUBY) do
       lockfile do
@@ -925,6 +1002,34 @@ describe "Bundler::Multilock" do
       expect(expect_matching_checksums("Gemfile.lock", "Gemfile.alt.lock"))
         .to include("concurrent-ruby (1.3.4)", "tzinfo (2.0.6)")
       expect(lockfile_checksums("Gemfile.alt.lock")["rake (13.2.1)"]).not_to be_nil
+    end
+  end
+
+  it "notices and fixes mismatched checksums for gems in common between lockfiles" do
+    with_gemfile(<<~RUBY) do
+      gem "concurrent-ruby", "1.2.2"
+
+      lockfile do
+      end
+
+      lockfile "alt" do
+        gem "rake", "13.2.1"
+      end
+    RUBY
+      invoke_bundler("install")
+
+      bad_checksum = "0" * 64
+      replace_string("Gemfile.alt.lock",
+                     /^(  concurrent-ruby \(1\.2\.2\) sha256=)\h+$/,
+                     "\\1#{bad_checksum}")
+      expect(lockfile_checksums("Gemfile.alt.lock")["concurrent-ruby (1.2.2)"]).to eq bad_checksum
+
+      expect { invoke_bundler("check") }
+        .to raise_error(/The checksum for concurrent-ruby \(1\.2\.2\) in Gemfile.alt.lock does not match/)
+
+      invoke_bundler("lock")
+      expect(expect_matching_checksums("Gemfile.lock", "Gemfile.alt.lock")).to include("concurrent-ruby (1.2.2)")
+      invoke_bundler("check")
     end
   end
 

@@ -51,9 +51,11 @@ module Bundler
 
         raise ArgumentError, "Lockfile #{lockfile} is already defined" if lockfile_definitions.key?(lockfile)
 
-        env_lockfile = lockfile if active && self.env_lockfile == "active"
-        env_lockfile ||= self.env_lockfile&.then { |l| expand_lockfile(l) }
-        active = env_lockfile == lockfile if env_lockfile
+        env_lockfile_names = self.env_lockfile_names
+        unless env_lockfile_names.empty?
+          active = (active && env_lockfile_names.include?("active")) ||
+                   env_lockfile_names.any? { |name| expand_lockfile(name) == lockfile }
+        end
 
         if active && (old_active = lockfile_definitions.each_value.find { |definition| definition[:active] })
           raise ArgumentError, "Only one lockfile (#{old_active[:lockfile]}) can be flagged as active"
@@ -78,7 +80,7 @@ module Bundler
         # If they're using BUNDLE_LOCKFILE, then they really do want to
         # use a particular lockfile, and it overrides whatever they
         # dynamically set in their gemfile
-        if !env_lockfile && defined?(CLI) &&
+        if env_lockfile_names.empty? && defined?(CLI) &&
            %i[check install lock update].include?(CLI.instance&.current_command_chain&.first)
           # always use Gemfile.lock for `bundle check`, `bundle install`,
           # `bundle lock`, and `bundle update`.
@@ -331,7 +333,7 @@ module Bundler
         @loaded = true
         if lockfile_definitions.empty?
           # nothing for Multilock to manage; use BUNDLE_LOCKFILE as a plain path, like Bundler would
-          if env_lockfile && env_lockfile != "active"
+          if env_lockfile && !env_lockfile_names.include?("active")
             Bundler.default_lockfile = Pathname.new(File.expand_path(env_lockfile))
           end
           return
@@ -339,7 +341,9 @@ module Bundler
 
         return unless lockfile_definitions.each_value.none? { |definition| definition[:active] }
 
-        return if env_lockfile&.then { |l| expand_lockfile(l) } == Bundler.default_lockfile(force_original: true)
+        if env_lockfile_names.any? { |name| expand_lockfile(name) == Bundler.default_lockfile(force_original: true) }
+          return
+        end
 
         raise GemfileNotFound, "Could not locate lockfile #{env_lockfile.inspect}" if env_lockfile
 
@@ -424,24 +428,26 @@ module Bundler
       end
 
       # @!visibility private
-      # The BUNDLE_LOCKFILE the user asked for, if any
+      # The BUNDLE_LOCKFILE the user asked for, if any, as close as possible to
+      # how they wrote it
       def env_lockfile
-        lockfile = ENV.fetch("BUNDLE_LOCKFILE", nil)
-        return if lockfile.nil? || lockfile.empty?
-        # Bundler sets BUNDLE_LOCKFILE itself for subprocesses (see Ext::SharedHelpers);
-        # that's not a request for a particular lockfile
-        return if lockfile == ENV.fetch(GENERATED_LOCKFILE_ENV, nil)
+        env_lockfile_and_recovered&.first
+      end
 
-        # Bundler expands BUNDLE_LOCKFILE to an absolute path, relative to the current
-        # directory. Undo that for a bare name, so that short lockfile names (and
-        # "active") still work.
-        path = Pathname.new(lockfile)
-        if path.absolute?
-          relative = path.relative_path_from(Pathname.pwd).to_s
-          return relative unless relative.include?("/")
-        end
+      # @!visibility private
+      # What BUNDLE_LOCKFILE could have been written as; usually just one
+      # thing (see #env_lockfile_and_recovered)
+      #
+      # @return [Array<String>]
+      def env_lockfile_names
+        lockfile, recovered = env_lockfile_and_recovered
+        return [] unless lockfile
+        return [lockfile] if recovered
 
-        lockfile
+        # we can't tell if Bundler expanded a short name (or "active") to an
+        # absolute path, or if it was written that way, so allow either
+        relative = Pathname.new(lockfile).relative_path_from(Pathname.pwd).to_s
+        relative.include?("/") ? [lockfile] : [lockfile, relative]
       end
 
       # @!visibility private
@@ -456,6 +462,29 @@ module Bundler
       end
 
       private
+
+      # @return [Array(String, true or false), nil]
+      #   BUNDLE_LOCKFILE, and if it's known to be exactly how the user wrote it
+      def env_lockfile_and_recovered
+        lockfile = ENV.fetch("BUNDLE_LOCKFILE", nil)
+        return if lockfile.nil? || lockfile.empty?
+        # Bundler sets BUNDLE_LOCKFILE itself for subprocesses (see Ext::SharedHelpers);
+        # that's not a request for a particular lockfile
+        return if lockfile == ENV.fetch(GENERATED_LOCKFILE_ENV, nil)
+        # not expanded by Bundler (yet)
+        return [lockfile, true] unless Pathname.new(lockfile).absolute?
+
+        # Bundler expands BUNDLE_LOCKFILE to an absolute path, relative to the
+        # current directory, but remembers the original value. That original
+        # is inherited by nested bundler commands though, so make sure it's
+        # actually the one that was expanded.
+        original = ENV.fetch("#{EnvironmentPreserver::BUNDLER_PREFIX}BUNDLE_LOCKFILE", nil)
+        if original && original != EnvironmentPreserver::INTENTIONALLY_NIL && File.expand_path(original) == lockfile
+          return [original, true]
+        end
+
+        [lockfile, false]
+      end
 
       def expand_lockfile(lockfile)
         if lockfile.is_a?(String) && !(lockfile.include?("/") || lockfile.end_with?(".lock"))
@@ -475,12 +504,22 @@ module Bundler
       # or if it still references a prerelease after a release.
       def upgrade_preamble(gemfile, requirement)
         gemfile.gsub!(/^\n?[ \t]*Plugin\.send\(:load_plugin, (["'])bundler-multilock\1\)[ \t]*\n/, "")
-        gemfile.gsub!(/(return unless Plugin\.)installed\?(\((["'])bundler-multilock\3\))/, "\\1loaded?\\2")
+        # normalize the guard (with or without parentheses), so that it's
+        # recognized as already present
+        guard = /return\ unless\ Plugin\.(?:installed|loaded)\?
+                 (?:\(\s*(["'])bundler-multilock\1\s*\) # parenthesized
+                 |\s+(["'])bundler-multilock\2)          # or not
+                /x
+        gemfile.gsub!(guard) do
+          quote = $1 || $2
+          "return unless Plugin.loaded?(#{quote}bundler-multilock#{quote})"
+        end
         # every string argument after the name is a version constraint, until
-        # options (like `source:`, or `"source" =>`) start
-        constraint = /\s*,\s*(["'])[^"'\n]*\k<-1>(?!\s*=>)/
+        # options (like `source:`, or `"source" =>`) start. there may be
+        # newlines and comments between them.
+        constraint = /\s*,(?:\s|\#[^\n]*)*(["'])[^"'\n]*\k<-1>(?!\s*=>)/
         gemfile.gsub!(/^([ \t]*plugin\(?\s*(["'])bundler-multilock\2)((?:#{constraint})+)/) do |match|
-          prefix, constraints = $1, $3
+          prefix, constraints = $1, $3.gsub(/\#[^\n]*/, "")
           quote = constraints[/["']/]
           existing_requirement = Gem::Requirement.new(*constraints.scan(/(["'])([^"'\n]*)\1/).map(&:last))
           version = Gem::Version.new(VERSION)
