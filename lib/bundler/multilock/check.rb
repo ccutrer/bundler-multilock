@@ -91,25 +91,30 @@ module Bundler
         Bundler.root = default_root
       end
 
-      # checks that gems in common (same version and source) with the parent lockfile
-      # have the same checksums
-      def checksums_match?(parser, parent_parser, lockfile_path)
+      # checks that every gem has a checksum, and that gems in common (same version
+      # and source) with the parent lockfile have the same checksums
+      def checksums_valid?(parser, parent_parser, lockfile_path)
         parent_specs = parent_parser.specs.to_h { |spec| [spec.full_name, spec] }
-        mismatched = parser.specs.select do |spec|
+        invalid = parser.specs.select do |spec|
           next false unless spec.source.is_a?(Source::Rubygems)
+
+          checksums = spec.source.checksum_store.checksums_to_lock(spec.full_name)
+          unless checksums
+            Bundler.ui.error("#{lockfile_path} is missing a checksum for #{spec.lock_name}.")
+            next true
+          end
 
           parent_spec = parent_specs[spec.full_name]
           next false unless parent_spec && parent_spec.source == spec.source
 
           parent_checksums = parent_spec.source.checksum_store.checksums_to_lock(spec.full_name)
-          checksums = spec.source.checksum_store.checksums_to_lock(spec.full_name)
           next false if parent_checksums.nil? || checksums == parent_checksums
 
           Bundler.ui.error("The checksum for #{spec.lock_name} in #{lockfile_path} " \
                            "does not match the parent lockfile's (#{parent_checksums}).")
           true
         end
-        mismatched.empty?
+        invalid.empty?
       end
 
       # this checks for mismatches between the parent lockfile and the given lockfile,
@@ -143,7 +148,7 @@ module Bundler
                              "but #{lockfile_path} #{parser.checksums ? "does" : "does not"}.")
             success = false
           end
-          if parser.checksums && parent_parser.checksums && !checksums_match?(parser, parent_parser, lockfile_path)
+          if parser.checksums && parent_parser.checksums && !checksums_valid?(parser, parent_parser, lockfile_path)
             success = false
           end
 

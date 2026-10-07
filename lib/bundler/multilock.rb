@@ -123,7 +123,8 @@ module Bundler
 
         if Bundler.frozen_bundle? && !install
           # only do the checks if we're frozen
-          exit 1 unless Check.run
+          # `bundle lock` doesn't install anything
+          exit 1 unless Check.new(check_installed: false).run
           return
         end
 
@@ -402,15 +403,21 @@ module Bundler
 
         gemfile = gemfiles[Bundler.default_gemfile.expand_path] || Bundler.default_gemfile.read
 
+        # skip past leading comments, blank lines, and sources.
+        # (\G anchors at injection_point; ^ would match any later line)
         injection_point = 0
-        while gemfile.match?(/^(?:#|\n|source)/, injection_point)
+        while injection_point < gemfile.length && gemfile.match?(/\G(?:#|\n|source)/, injection_point)
           if gemfile[injection_point] == "\n"
             injection_point += 1
           else
-            injection_point = gemfile.index("\n", injection_point)
-            injection_point += 1 if injection_point
-            injection_point ||= -1
+            injection_point = (gemfile.index("\n", injection_point) || (gemfile.length - 1)) + 1
           end
+        end
+        # don't append to the end of the last line. (if we got to the end, the
+        # Gemfile is only comments and sources, so the preamble will be injected.)
+        if injection_point == gemfile.length && !gemfile.empty? && !gemfile.end_with?("\n")
+          gemfile << "\n"
+          injection_point += 1
         end
 
         inject_specific_preamble(gemfile, gemfiles.values, injection_point, bundle_preamble2, add_newline: true)
@@ -503,23 +510,25 @@ module Bundler
       # Also update the version requirement if it doesn't allow this version,
       # or if it still references a prerelease after a release.
       def upgrade_preamble(gemfile, requirement)
-        gemfile.gsub!(/^\n?[ \t]*Plugin\.send\(:load_plugin, (["'])bundler-multilock\1\)[ \t]*\n/, "")
+        load_plugin = /^\n?[ \t]*Plugin\.send\(:load_plugin, (["'])bundler-multilock\1\)[ \t]*\n/
+        gsub_code!(gemfile, load_plugin, "Plugin") { "" }
         # normalize the guard (with or without parentheses), so that it's
         # recognized as already present
         guard = /return\ unless\ Plugin\.(?:installed|loaded)\?
                  (?:\(\s*(["'])bundler-multilock\1\s*\) # parenthesized
                  |\s+(["'])bundler-multilock\2)          # or not
                 /x
-        gemfile.gsub!(guard) do
-          quote = $1 || $2
+        gsub_code!(gemfile, guard, "return") do |m|
+          quote = m[1] || m[2]
           "return unless Plugin.loaded?(#{quote}bundler-multilock#{quote})"
         end
         # every string argument after the name is a version constraint, until
         # options (like `source:`, or `"source" =>`) start. there may be
         # newlines and comments between them.
         constraint = /\s*,(?:\s|\#[^\n]*)*(["'])[^"'\n]*\k<-1>(?!\s*=>)/
-        gemfile.gsub!(/^([ \t]*plugin\(?\s*(["'])bundler-multilock\2)((?:#{constraint})+)/) do |match|
-          prefix, constraints = $1, $3.gsub(/\#[^\n]*/, "")
+        gsub_code!(gemfile, /^([ \t]*plugin\(?\s*(["'])bundler-multilock\2)((?:#{constraint})+)/, "plugin") do |m|
+          match = m[0]
+          prefix, constraints = m[1], m[3].gsub(/\#[^\n]*/, "")
           quote = constraints[/["']/]
           existing_requirement = Gem::Requirement.new(*constraints.scan(/(["'])([^"'\n]*)\1/).map(&:last))
           version = Gem::Version.new(VERSION)
@@ -533,10 +542,50 @@ module Bundler
         end
       end
 
+      # Like String#gsub!, but skips matches whose `keyword` is inside a string,
+      # heredoc, or comment, instead of actual Ruby code
+      #
+      # @yieldparam match [MatchData]
+      def gsub_code!(source, pattern, keyword)
+        non_code = non_code_ranges(source)
+        source.gsub!(pattern) do |match|
+          match_data = Regexp.last_match
+          offset = match_data.byteoffset(0).first + match.b.index(keyword)
+          next match if non_code.any? { |range| range.cover?(offset) }
+
+          yield match_data
+        end
+      end
+
+      # @return [true, false] if pattern matches somewhere other than in a string, heredoc, or comment
+      def match_in_code?(source, pattern)
+        non_code = non_code_ranges(source)
+        source.to_enum(:scan, pattern).any? do
+          offset = Regexp.last_match.byteoffset(0).first
+          non_code.none? { |range| range.cover?(offset) }
+        end
+      end
+
+      # @return [Array<Range>] the byte ranges of strings, heredocs, and comments in Ruby source
+      def non_code_ranges(source)
+        require "ripper"
+
+        line_offsets = [0]
+        source.each_line { |line| line_offsets << (line_offsets.last + line.bytesize) }
+
+        Ripper.lex(source).filter_map do |(line, column), type, token|
+          start = line_offsets[line - 1] + column
+          case type
+          when :on_tstring_content, :on_comment, :on_embdoc then start...(start + token.bytesize)
+          when :on___end__ then start...source.bytesize
+          end
+        end
+      end
+
       def inject_specific_preamble(gemfile, gemfiles, injection_point, preamble, add_newline:, match: nil) # rubocop:disable Naming/PredicateMethod -- not a predicate
         # allow either type of quotes
         match ||= Regexp.new(Regexp.escape(preamble).gsub('"', %(["'])))
-        return false if gemfiles.any? { |g| match.match?(g) }
+        return false if gemfiles.any? { |g| match_in_code?(g, match) }
 
         add_newline = false unless gemfile[injection_point - 1] == "\n"
 
@@ -546,28 +595,41 @@ module Bundler
         true
       end
 
-      # Copies checksums from the parent lockfile for gems in common, so that they match
+      # Gems resolved from what's installed locally don't have checksums. Copy
+      # them from the parent lockfile for gems in common (so that they match),
+      # or else compute them from cached gems (without fetching anything).
       #
-      # @return [true, false] if any (rubygems) gems are still missing checksums
-      def copy_parent_checksums(definition, parent_lockfile, cache)
-        return false if Bundler.frozen_bundle? || !definition.locked_checksums
+      # @return [Array] specs that still don't have checksums
+      def fill_checksums(definition, parent_lockfile, cache)
+        return [] if Bundler.frozen_bundle? || !definition.locked_checksums
+
+        require "rubygems/package"
 
         parent_specs = cache.parser(parent_lockfile).specs.to_h { |spec| [spec.full_name, spec] }
-        missing = false
-        definition.resolve.each do |spec|
-          next unless spec.source.is_a?(Source::Rubygems)
+        definition.resolve.select do |spec|
+          next false unless spec.source.is_a?(Source::Rubygems)
 
           store = spec.source.checksum_store
           if (parent_spec = parent_specs[spec.full_name]) &&
+             parent_spec.source == spec.source &&
              (checksums = parent_spec.source.checksum_store.checksums_to_lock(spec.full_name))
             checksums.split(",").each do |checksum|
               store.replace(spec, Checksum.from_lock(checksum, parent_lockfile.to_s))
             end
           end
+          next false unless store.missing?(spec) || store.empty?(spec)
 
-          missing = true if store.missing?(spec) || store.empty?(spec)
+          cached_gem = spec.source.cached_built_in_gem(spec, local: true)
+          store.register(spec, Checksum.from_gem_package(Gem::Package.new(cached_gem))) if cached_gem
+          store.missing?(spec) || store.empty?(spec)
         end
-        missing
+      end
+
+      # @return [true, false] if running with `--local`, so nothing should be fetched
+      def local_only?
+        return false unless defined?(CLI) && CLI.respond_to?(:instance)
+
+        CLI.instance&.options&.[]("local") ? true : false
       end
 
       def write_lockfile(lockfile_definition,
@@ -664,15 +726,23 @@ module Bundler
               spec.source.specs << spec
             end
             definition.resolve_with_cache!
-            # gems resolved from what's installed locally don't have checksums,
-            # so resolve remotely if the parent lockfile doesn't have them either
-            raise SolveFailure if copy_parent_checksums(definition, lockfile_definition[:parent], cache)
+            missing_checksums = fill_checksums(definition, lockfile_definition[:parent], cache)
+            # fetch checksums that aren't available locally
+            raise SolveFailure unless missing_checksums.empty? || local_only?
           rescue GemNotFound, SolveFailure
+            raise if local_only?
+
             definition = orig_definition
 
             definition.resolve_remotely!
-            copy_parent_checksums(definition, lockfile_definition[:parent], cache)
             resolved_remotely = true
+            missing_checksums = fill_checksums(definition, lockfile_definition[:parent], cache)
+          end
+          if local_only? && !missing_checksums.empty?
+            raise GemNotFound,
+                  "Could not find checksums for #{missing_checksums.map(&:full_name).join(", ")} " \
+                  "(for #{lockfile_definition[:lockfile].relative_path_from(Dir.pwd)}) locally. " \
+                  "Run without `--local` to fetch them."
           end
           SharedHelpers.capture_filesystem_access do
             definition.instance_variable_set(:@resolved_bundler_version, unlocking_bundler) if unlocking_bundler
@@ -730,7 +800,13 @@ if defined?(Bundler::CLI)
       next unless $!.nil?
       next if $!.is_a?(SystemExit) && !$!.success?
 
-      Bundler::Multilock.after_install_all(install: false)
+      begin
+        Bundler::Multilock.after_install_all(install: false)
+      rescue Bundler::BundlerError => e
+        # this is outside of Bundler's usual error handling
+        Bundler.ui.error(e.message)
+        exit e.status_code
+      end
     end
   end
 end

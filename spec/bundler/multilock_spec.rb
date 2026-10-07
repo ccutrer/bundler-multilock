@@ -44,6 +44,73 @@ describe "Bundler::Multilock" do
     end
   end
 
+  it "injects plugin load commands right after the source, even with comments and blank lines later" do
+    with_gemfile("") do
+      File.write("Gemfile", <<~RUBY)
+        # frozen_string_literal: true
+
+        source "https://rubygems.org"
+
+        gem "concurrent-ruby", "1.2.2"
+
+        # a comment
+        gem "rake", "13.2.1"
+      RUBY
+
+      local_path = Shellwords.escape(File.expand_path("../..", __dir__))
+      invoke_bundler("plugin install bundler-multilock --path=#{local_path}")
+
+      expect(File.read("Gemfile")).to eq(<<~RUBY)
+        # frozen_string_literal: true
+
+        source "https://rubygems.org"
+
+        plugin "bundler-multilock", "#{plugin_requirement}"
+        return unless Plugin.loaded?("bundler-multilock")
+
+        gem "concurrent-ruby", "1.2.2"
+
+        # a comment
+        gem "rake", "13.2.1"
+      RUBY
+    end
+  end
+
+  it "injects plugin load commands on their own line when the Gemfile doesn't end with a newline" do
+    with_gemfile("") do
+      # (a lone `#` at the very end used to be able to loop forever)
+      File.write("Gemfile", %(source "https://rubygems.org"\n#))
+
+      local_path = Shellwords.escape(File.expand_path("../..", __dir__))
+      invoke_bundler("plugin install bundler-multilock --path=#{local_path}", timeout: 60)
+
+      expect(File.read("Gemfile")).to eq(<<~RUBY)
+        source "https://rubygems.org"
+        #
+        plugin "bundler-multilock", "#{plugin_requirement}"
+        return unless Plugin.loaded?("bundler-multilock")
+
+      RUBY
+    end
+  end
+
+  it "doesn't inject plugin load commands into a trailing comment without a newline" do
+    with_gemfile("") do
+      File.write("Gemfile", %(source "https://rubygems.org"\n# the end))
+
+      local_path = Shellwords.escape(File.expand_path("../..", __dir__))
+      invoke_bundler("plugin install bundler-multilock --path=#{local_path}")
+
+      expect(File.read("Gemfile")).to eq(<<~RUBY)
+        source "https://rubygems.org"
+        # the end
+        plugin "bundler-multilock", "#{plugin_requirement}"
+        return unless Plugin.loaded?("bundler-multilock")
+
+      RUBY
+    end
+  end
+
   it "removes the unnecessary plugin load command and updates the version requirement" do
     with_gemfile("") do
       File.write("Gemfile", <<~RUBY)
@@ -175,6 +242,81 @@ describe "Bundler::Multilock" do
         return unless Plugin.loaded?('bundler-multilock')
 
         gem 'concurrent-ruby', '1.2.2'
+      RUBY
+    end
+  end
+
+  it "only updates the preamble in code, not in strings, heredocs, or comments" do
+    with_gemfile("") do
+      File.write("Gemfile", <<~RUBY)
+        source "https://rubygems.org"
+
+        plugin "bundler-multilock", "~> 1.2"
+        return unless Plugin.installed?("bundler-multilock")
+
+        Plugin.send(:load_plugin, "bundler-multilock")
+
+        # plugin "bundler-multilock", "~> 1.2"
+        TEMPLATE = <<~GEMFILE
+          plugin "bundler-multilock", "~> 1.2"
+          return unless Plugin.installed?("bundler-multilock")
+          Plugin.send(:load_plugin, "bundler-multilock")
+        GEMFILE
+        SNIPPET = 'return unless Plugin.installed? "bundler-multilock"'
+
+        gem "concurrent-ruby", "1.2.2"
+      RUBY
+
+      local_path = Shellwords.escape(File.expand_path("../..", __dir__))
+      invoke_bundler("plugin install bundler-multilock --path=#{local_path}")
+
+      expect(File.read("Gemfile")).to eq(<<~RUBY)
+        source "https://rubygems.org"
+
+        plugin "bundler-multilock", "#{plugin_requirement}"
+        return unless Plugin.loaded?("bundler-multilock")
+
+        # plugin "bundler-multilock", "~> 1.2"
+        TEMPLATE = <<~GEMFILE
+          plugin "bundler-multilock", "~> 1.2"
+          return unless Plugin.installed?("bundler-multilock")
+          Plugin.send(:load_plugin, "bundler-multilock")
+        GEMFILE
+        SNIPPET = 'return unless Plugin.installed? "bundler-multilock"'
+
+        gem "concurrent-ruby", "1.2.2"
+      RUBY
+    end
+  end
+
+  it "injects the preamble if it's only in strings, heredocs, or comments" do
+    with_gemfile("") do
+      File.write("Gemfile", <<~RUBY)
+        source "https://rubygems.org"
+
+        # return unless Plugin.loaded?("bundler-multilock")
+        TEMPLATE = <<~GEMFILE
+          plugin "bundler-multilock", "~> 2.0"
+          return unless Plugin.loaded?("bundler-multilock")
+        GEMFILE
+        gem "concurrent-ruby", "1.2.2"
+      RUBY
+
+      local_path = Shellwords.escape(File.expand_path("../..", __dir__))
+      invoke_bundler("plugin install bundler-multilock --path=#{local_path}")
+
+      gemfile = File.read("Gemfile")
+      expect(gemfile).to include(<<~RUBY)
+        plugin "bundler-multilock", "#{plugin_requirement}"
+        return unless Plugin.loaded?("bundler-multilock")
+      RUBY
+      # the template and comment are untouched
+      expect(gemfile).to include(%(# return unless Plugin.loaded?("bundler-multilock")\n))
+      expect(gemfile).to include(<<~RUBY)
+        TEMPLATE = <<~GEMFILE
+          plugin "bundler-multilock", "~> 2.0"
+          return unless Plugin.loaded?("bundler-multilock")
+        GEMFILE
       RUBY
     end
   end
@@ -763,6 +905,12 @@ describe "Bundler::Multilock" do
       invoke_bundler("lock")
       expect(File.read("Gemfile.alt.lock")).to include("rack (3.1.8)")
 
+      # and a frozen `bundle lock` is happy with it (the local config would
+      # override BUNDLE_FROZEN)
+      invoke_bundler("config set --local frozen true")
+      invoke_bundler("lock")
+      invoke_bundler("config set --local frozen false")
+
       # it's still not installed
       expect { invoke_bundler("check") }.to raise_error(/The following gems are missing/)
     end
@@ -1030,6 +1178,37 @@ describe "Bundler::Multilock" do
       invoke_bundler("lock")
       expect(expect_matching_checksums("Gemfile.lock", "Gemfile.alt.lock")).to include("concurrent-ruby (1.2.2)")
       invoke_bundler("check")
+    end
+  end
+
+  it "only fetches checksums it can't compute locally when not running with --local" do
+    with_gemfile(<<~RUBY) do
+      gem "concurrent-ruby", "1.2.2"
+
+      lockfile do
+      end
+
+      lockfile "alt" do
+        gem "rake", "13.2.1"
+      end
+    RUBY
+      use_local_bundle_path
+      invoke_bundler("install")
+
+      # a gem only in the alternate lockfile, without a checksum or a cached
+      # package to compute one from
+      replace_string("Gemfile.alt.lock", /^(  rake \(13\.2\.1\)) sha256=\h+$/, "\\1")
+      FileUtils.rm(Dir["#{local_gem_dir}/cache/rake-13.2.1.gem"])
+
+      expect { invoke_bundler("install --local") }
+        .to raise_error(/Could not find checksums for rake-13\.2\.1 \(for Gemfile.alt.lock\) locally/)
+      expect { invoke_bundler("lock --local") }
+        .to raise_error(/Could not find checksums for rake-13\.2\.1 \(for Gemfile.alt.lock\) locally/)
+      expect(lockfile_checksums("Gemfile.alt.lock")["rake (13.2.1)"]).to be_nil
+
+      invoke_bundler("lock")
+      expect(lockfile_checksums("Gemfile.alt.lock")["rake (13.2.1)"]).to match(/\A\h{64}\z/)
+      invoke_bundler("install --local")
     end
   end
 
@@ -1427,13 +1606,24 @@ describe "Bundler::Multilock" do
   #
   # @param subcommand [String] Args to pass to bundler
   # @raise [RuntimeError] if the bundle command fails
-  def invoke_bundler(subcommand, env: {}, allow_failure: false)
+  def invoke_bundler(subcommand, env: {}, allow_failure: false, timeout: nil)
     output = nil
     command = "#{bundler_bin} #{subcommand}"
     Bundler.with_unbundled_env do
-      output, status = Open3.capture2e(env, command)
+      # in its own process group, so that it can be killed along with any children
+      Open3.popen2e(env, command, pgroup: true) do |stdin, stdout_and_stderr, wait_thread|
+        stdin.close
+        reader = Thread.new { stdout_and_stderr.read }
 
-      raise "bundle #{subcommand} failed: #{output}" unless allow_failure || status.success?
+        unless wait_thread.join(timeout)
+          Process.kill("KILL", -wait_thread.pid)
+          wait_thread.join
+          raise "bundle #{subcommand} timed out after #{timeout} seconds: #{reader.value}"
+        end
+
+        output = reader.value
+        raise "bundle #{subcommand} failed: #{output}" unless allow_failure || wait_thread.value.success?
+      end
     end
     output
   end
