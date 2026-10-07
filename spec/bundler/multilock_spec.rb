@@ -343,6 +343,57 @@ describe "Bundler::Multilock" do
     end
   end
 
+  it "injects the guard after an existing plugin declaration" do
+    with_gemfile("") do
+      File.write("Gemfile", <<~RUBY)
+        source "https://rubygems.org"
+
+        plugin "bundler-multilock", "#{plugin_requirement}"
+
+        gem "concurrent-ruby", "1.2.2"
+      RUBY
+
+      local_path = Shellwords.escape(File.expand_path("../..", __dir__))
+      invoke_bundler("plugin install bundler-multilock --path=#{local_path}")
+
+      expect(File.read("Gemfile")).to eq(<<~RUBY)
+        source "https://rubygems.org"
+
+        plugin "bundler-multilock", "#{plugin_requirement}"
+        return unless Plugin.loaded?("bundler-multilock")
+
+        gem "concurrent-ruby", "1.2.2"
+      RUBY
+    end
+  end
+
+  it "injects the guard after an existing plugin declaration in a secondary Gemfile" do
+    with_gemfile("") do
+      File.write("Gemfile", <<~RUBY)
+        source "https://rubygems.org"
+
+        eval_gemfile("injected.rb")
+      RUBY
+      File.write("injected.rb", <<~RUBY)
+        plugin "bundler-multilock", "#{plugin_requirement}"
+
+        gem "concurrent-ruby", "1.2.2"
+      RUBY
+      gemfile = File.read("Gemfile")
+
+      local_path = Shellwords.escape(File.expand_path("../..", __dir__))
+      invoke_bundler("plugin install bundler-multilock --path=#{local_path}")
+
+      expect(File.read("Gemfile")).to eq gemfile
+      expect(File.read("injected.rb")).to eq(<<~RUBY)
+        plugin "bundler-multilock", "#{plugin_requirement}"
+        return unless Plugin.loaded?("bundler-multilock")
+
+        gem "concurrent-ruby", "1.2.2"
+      RUBY
+    end
+  end
+
   it "does not inject when a secondary Gemfile has the necessary commands" do
     with_gemfile("") do
       File.write("Gemfile", <<~RUBY)
