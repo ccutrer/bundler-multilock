@@ -16,11 +16,15 @@
 ## Bundler 4 behaviors the code depends on
 
 - Bundler reads `BUNDLE_LOCKFILE` itself, expands it to an absolute path, and sets it for subprocesses. Use
-  `Multilock.env_lockfile` and `Multilock.env_lockfile_names`. They ignore the value Bundler set for subprocesses
-  (marked in `BUNDLE_MULTILOCK_GENERATED_LOCKFILE`), and recover what the user wrote from
-  `BUNDLER_ORIG_BUNDLE_LOCKFILE` when it matches. In nested bundler commands it can't be recovered, so a bare name
-  in the current directory could be either a path or a short lockfile name. Don't read `ENV["BUNDLE_LOCKFILE"]`
+  `Multilock.env_lockfile` and `Multilock.env_lockfile_names`. They recover what the user wrote from
+  `BUNDLER_ORIG_BUNDLE_LOCKFILE` when it matches, and ignore the default lockfile that Bundler sets for subprocesses
+  when nobody asked for one. In nested bundler commands what the user wrote can't be recovered, so a bare name in
+  the current directory could be either a path or a short lockfile name. Don't read `ENV["BUNDLE_LOCKFILE"]`
   directly.
+- `bundle exec` sets up the environment for subprocesses before the plugin is loaded, so the plugin can't hook
+  that.
+- Nested bundler commands (like `bundle exec bundle install`) run `bundler/setup` first, which evaluates the
+  Gemfile before the command does. Gemfile evaluations after that have to cope with Multilock already being loaded.
 - Bundler re-registers a path-installed plugin's hooks only when its path changes. After editing hooks in
   `plugins.rb`, delete `.bundle/plugin` and reinstall.
 - Bundler always locks a gem's source variant as a fallback. A precompiled gem's Ruby upper bound never makes a

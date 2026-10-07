@@ -675,6 +675,32 @@ describe Bundler::Multilock do
     end
   end
 
+  it "uses the active lockfile in commands nested inside `bundle exec`" do
+    with_gemfile(<<~RUBY) do
+      lockfile active: false do
+        gem "concurrent-ruby", "1.2.2"
+      end
+
+      lockfile "alt", active: true do
+        gem "concurrent-ruby", "1.3.4"
+      end
+    RUBY
+      invoke_bundler("install")
+      lockfiles = %w[Gemfile.lock Gemfile.alt.lock].to_h { |lockfile| [lockfile, File.read(lockfile)] }
+
+      # the nested commands inherit the environment that `bundle exec` sets up
+      # (including BUNDLE_LOCKFILE), instead of a clean one
+      expect(invoke_bundler(%(exec ruby -e 'require "concurrent/version"; puts Concurrent::VERSION')))
+        .to include("1.3.4")
+      expect(invoke_bundler("exec #{bundler_bin} info concurrent-ruby")).to include("1.3.4")
+
+      # in the same process, and a separate one
+      invoke_bundler("exec #{bundler_bin} install")
+      invoke_bundler("exec env #{bundler_bin} install")
+      expect(lockfiles.keys.to_h { |lockfile| [lockfile, File.read(lockfile)] }).to eq lockfiles
+    end
+  end
+
   it "respects BUNDLE_LOCKFILE in a bundler command nested inside `bundle exec`" do
     with_gemfile(<<~RUBY) do
       lockfile do

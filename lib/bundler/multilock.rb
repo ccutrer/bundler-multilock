@@ -12,9 +12,6 @@ require_relative "multilock/version"
 
 module Bundler
   module Multilock
-    # @!visibility private
-    GENERATED_LOCKFILE_ENV = "BUNDLE_MULTILOCK_GENERATED_LOCKFILE"
-
     class << self
       # @!visibility private
       attr_reader :lockfile_definitions
@@ -402,9 +399,6 @@ module Bundler
       def env_lockfile_and_recovered
         lockfile = ENV.fetch("BUNDLE_LOCKFILE", nil)
         return if lockfile.nil? || lockfile.empty?
-        # Bundler sets BUNDLE_LOCKFILE itself for subprocesses (see Ext::SharedHelpers);
-        # that's not a request for a particular lockfile
-        return if lockfile == ENV.fetch(GENERATED_LOCKFILE_ENV, nil)
         # not expanded by Bundler (yet)
         return [lockfile, true] unless Pathname.new(lockfile).absolute?
 
@@ -413,7 +407,11 @@ module Bundler
         # is inherited by nested bundler commands though, so make sure it's
         # actually the one that was expanded.
         original = ENV.fetch("#{EnvironmentPreserver::BUNDLER_PREFIX}BUNDLE_LOCKFILE", nil)
-        if original && original != EnvironmentPreserver::INTENTIONALLY_NIL && File.expand_path(original) == lockfile
+        if original == EnvironmentPreserver::INTENTIONALLY_NIL
+          # Bundler sets BUNDLE_LOCKFILE to the default lockfile for subprocesses
+          # when nobody asked for a particular lockfile
+          return if lockfile == Bundler.default_lockfile(force_original: true).to_s
+        elsif original && File.expand_path(original) == lockfile
           return [original, true]
         end
 
@@ -585,7 +583,8 @@ module Bundler
             # need to force it to _not_ preserve unknown sections, so that it
             # will overwrite the ruby version
             definition.instance_variable_set(:@unlocking_bundler, true)
-            definition.lockfile = lockfile_definition[:lockfile]
+            # not `lockfile=`, which may substitute the lockfile from BUNDLE_LOCKFILE
+            definition.instance_variable_set(:@lockfile, lockfile_definition[:lockfile])
             definition.lock
           end
         ensure
