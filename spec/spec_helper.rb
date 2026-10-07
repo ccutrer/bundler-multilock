@@ -2,6 +2,8 @@
 
 require "debug"
 
+require_relative "support/helpers"
+
 RSpec.configure do |config|
   config.expect_with :rspec do |c|
     c.max_formatted_output_length = nil
@@ -10,4 +12,6 @@ RSpec.configure do |config|
   config.run_all_when_everything_filtered = true
   config.filter_run :focus
   config.order = "random"
+
+  config.include MultilockHelpers
 end
