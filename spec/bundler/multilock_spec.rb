@@ -865,6 +865,69 @@ describe "Bundler::Multilock" do
     end
   end
 
+  it "syncs whether there are checksums to secondary lockfiles" do
+    with_gemfile(<<~RUBY) do
+      gem "concurrent-ruby", "1.2.2"
+
+      lockfile do
+      end
+
+      lockfile "alt" do
+        gem "rake", "13.2.1"
+      end
+    RUBY
+      invoke_bundler("install")
+      expect(File.read("Gemfile.alt.lock")).to include("CHECKSUMS")
+
+      # the parent lockfile has checksums, but the alternate doesn't
+      remove_checksums_section("Gemfile.alt.lock")
+      expect { invoke_bundler("check") }
+        .to raise_error(/The parent lockfile has checksums, but Gemfile.alt.lock does not/)
+
+      invoke_bundler("install")
+      expect(File.read("Gemfile.alt.lock")).to match(/^CHECKSUMS\n.*^  rake \(13\.2\.1\) sha256=/m)
+      invoke_bundler("check")
+
+      # and the other way around
+      remove_checksums_section("Gemfile.lock")
+      expect { invoke_bundler("check") }
+        .to raise_error(/The parent lockfile does not have checksums, but Gemfile.alt.lock does/)
+
+      invoke_bundler("install")
+      expect(File.read("Gemfile.alt.lock")).not_to include("CHECKSUMS")
+      invoke_bundler("check")
+    end
+  end
+
+  it "keeps checksums the same for gems in common between lockfiles" do
+    with_gemfile(<<~RUBY) do
+      gem "concurrent-ruby", "1.2.2"
+      gem "tzinfo", "2.0.6"
+
+      lockfile do
+      end
+
+      lockfile "alt" do
+        gem "rake", "13.2.1"
+      end
+    RUBY
+      invoke_bundler("install")
+      expect(expect_matching_checksums("Gemfile.lock", "Gemfile.alt.lock"))
+        .to include("concurrent-ruby (1.2.2)", "tzinfo (2.0.6)")
+      # gems only in the alternate lockfile get checksums too
+      expect(lockfile_checksums("Gemfile.alt.lock")["rake (13.2.1)"]).not_to be_nil
+
+      # update a gem in common, so that the alternate lockfile gets merged
+      # with the new version from the default lockfile
+      replace_string("Gemfile", 'gem "concurrent-ruby", "1.2.2"', 'gem "concurrent-ruby", "1.3.4"')
+      invoke_bundler("install")
+      expect(File.read("Gemfile.alt.lock")).to include("concurrent-ruby (1.3.4)")
+      expect(expect_matching_checksums("Gemfile.lock", "Gemfile.alt.lock"))
+        .to include("concurrent-ruby (1.3.4)", "tzinfo (2.0.6)")
+      expect(lockfile_checksums("Gemfile.alt.lock")["rake (13.2.1)"]).not_to be_nil
+    end
+  end
+
   it "updates bundler version in secondary lockfiles" do
     with_gemfile(<<~RUBY) do
       gem "rake"
@@ -1334,6 +1397,33 @@ describe "Bundler::Multilock" do
   # The checksum is no longer valid after manually changing the version
   def remove_checksum(contents, gem)
     contents.gsub(/^(  #{Regexp.escape(gem)} \([^)]+\)) sha256=\h+$/, "\\1")
+  end
+
+  # @return [Hash<String, String>] the CHECKSUMS entries of a lockfile, keyed by gem and version
+  def lockfile_checksums(lockfile)
+    section = File.read(lockfile)[/^CHECKSUMS\n(.*?)\n\n/m, 1]
+    raise "#{lockfile} doesn't have checksums" unless section
+
+    section.lines.to_h do |line|
+      full_name, checksum = line.strip.split(" sha256=")
+      [full_name, checksum]
+    end
+  end
+
+  # Expects every gem (and version) locked in both lockfiles to have the same checksum in each
+  #
+  # @return [Array<String>] the gems (and versions) in common
+  def expect_matching_checksums(lockfile1, lockfile2)
+    checksums1 = lockfile_checksums(lockfile1)
+    checksums2 = lockfile_checksums(lockfile2)
+    common = checksums1.keys & checksums2.keys
+
+    expect(checksums2.slice(*common)).to eq checksums1.slice(*common)
+    common
+  end
+
+  def remove_checksums_section(lockfile)
+    File.write(lockfile, File.read(lockfile).sub(/^CHECKSUMS\n.*?\n\n/m, ""))
   end
 
   def replace_lockfile_git_pin(revision)

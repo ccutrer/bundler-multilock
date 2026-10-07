@@ -117,6 +117,11 @@ module Bundler
                              "does not match the parent lockfile's version (#{parent_parser.ruby_version}).")
             success = false
           end
+          unless !parser.checksums == !parent_parser.checksums
+            Bundler.ui.error("The parent lockfile #{parent_parser.checksums ? "has" : "does not have"} checksums, " \
+                             "but #{lockfile_path} #{parser.checksums ? "does" : "does not"}.")
+            success = false
+          end
 
           # look through top-level explicit dependencies for pinned requirements
           if lockfile_definition[:enforce_pinned_additional_dependencies]

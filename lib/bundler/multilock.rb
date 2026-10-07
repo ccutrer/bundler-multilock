@@ -507,6 +507,30 @@ module Bundler
         true
       end
 
+      # Copies checksums from the parent lockfile for gems in common, so that they match
+      #
+      # @return [true, false] if any (rubygems) gems are still missing checksums
+      def copy_parent_checksums(definition, parent_lockfile, cache)
+        return false if Bundler.frozen_bundle? || !definition.locked_checksums
+
+        parent_specs = cache.parser(parent_lockfile).specs.to_h { |spec| [spec.full_name, spec] }
+        missing = false
+        definition.resolve.each do |spec|
+          next unless spec.source.is_a?(Source::Rubygems)
+
+          store = spec.source.checksum_store
+          if (parent_spec = parent_specs[spec.full_name]) &&
+             (checksums = parent_spec.source.checksum_store.checksums_to_lock(spec.full_name))
+            checksums.split(",").each do |checksum|
+              store.replace(spec, Checksum.from_lock(checksum, parent_lockfile.to_s))
+            end
+          end
+
+          missing = true if store.missing?(spec) || store.empty?(spec)
+        end
+        missing
+      end
+
       def write_lockfile(lockfile_definition,
                          lockfile,
                          cache,
@@ -530,6 +554,16 @@ module Bundler
 
         definition = builder.to_definition(lockfile, { bundler: unlocking_bundler })
         definition.instance_variable_set(:@dependency_changes, dependency_changes) if dependency_changes
+
+        # match the parent lockfile in whether there are checksums
+        unless Bundler.frozen_bundle?
+          parent_checksums = cache.parser(lockfile_definition[:parent]).checksums
+          if parent_checksums && !definition.locked_checksums
+            definition.add_checksums
+          elsif !parent_checksums && definition.locked_checksums
+            definition.instance_variable_set(:@locked_checksums, false)
+          end
+        end
 
         current_lockfile = lockfile_definition[:lockfile]
         definition.instance_variable_set(:@lockfile_contents, current_lockfile.read) if current_lockfile.exist?
@@ -591,10 +625,14 @@ module Bundler
               spec.source.specs << spec
             end
             definition.resolve_with_cache!
+            # gems resolved from what's installed locally don't have checksums,
+            # so resolve remotely if the parent lockfile doesn't have them either
+            raise SolveFailure if copy_parent_checksums(definition, lockfile_definition[:parent], cache)
           rescue GemNotFound, SolveFailure
             definition = orig_definition
 
             definition.resolve_remotely!
+            copy_parent_checksums(definition, lockfile_definition[:parent], cache)
             resolved_remotely = true
           end
           SharedHelpers.capture_filesystem_access do
