@@ -2,7 +2,7 @@ PATH
   remote: .
   specs:
     bundler-multilock (2.0.0.beta1)
-      bundler (>= 4.1.0.beta1, < 5)
+      bundler (>= 4.1.0.beta2, < 5)
 
 GEM
   remote: https://rubygems.org/
@@ -125,7 +125,7 @@ DEPENDENCIES
 
 CHECKSUMS
   ast (2.4.3) sha256=954615157c1d6a382bc27d690d973195e79db7f55e9765ac7c481c60bdb4d383
-  bundler (4.1.0.beta1) sha256=8a2dac8ca276ff4eff5efc2c6457b0044080fc1e431534ad7c5cc6187232b800
+  bundler (4.1.0.beta2) sha256=ffd80c244e3c080cbc403b194e7b386668c69275561f81b7a801f08772a6e2d6
   bundler-multilock (2.0.0.beta1)
   debug (1.11.1) sha256=2e0b0ac6119f2207a6f8ac7d4a73ca8eb4e440f64da0a3136c30343146e952b6
   diff-lcs (1.6.2) sha256=9ae0d2cba7d4df3075fe8cd8602a8604993efc0dfa934cff568969efb1909962
@@ -172,4 +172,4 @@ CHECKSUMS
   unicode-emoji (4.3.0) sha256=11c02fa73290378c066bb0562cd4c87d8e1b706fbbe0059ca12746a4244de8ce
 
 BUNDLED WITH
-  4.1.0.beta1
+  4.1.0.beta2

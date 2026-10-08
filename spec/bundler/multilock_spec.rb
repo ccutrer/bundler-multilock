@@ -692,7 +692,7 @@ describe Bundler::Multilock do
   end
 
   it "doesn't break env" do
-    if Gem::Version.new(Gem::VERSION) < Gem::Version.new("4.1.0.beta1")
+    if Gem::Version.new(Gem::VERSION) < Gem::Version.new("4.1.0.beta2")
       # Bundler 4.1 writes empty hashes as `{}` in the plugin index, but `bundle env`
       # loads the older RubyGems YAMLSerializer first, which reads them as strings.
       # This affects any plugin, not just this one.
