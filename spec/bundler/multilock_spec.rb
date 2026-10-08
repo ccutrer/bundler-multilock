@@ -312,7 +312,9 @@ describe Bundler::Multilock do
                      .gsub(/^  bundler-multilock .*\n/, "")
       File.write("other/Gemfile.lock", lockfile)
       expect(File.read("other/Gemfile.lock")).not_to include("bundler-multilock")
-      expect { invoke_bundler("check") }.to raise_error(/bundle install/)
+      # (removing the plugin also removed its source)
+      expect { invoke_bundler("check") }
+        .to raise_error(%r{The sources in other/Gemfile.lock do not match other/Gemfile.\n  Only in other/Gemfile: })
 
       invoke_bundler("install")
       expect(File.read("other/Gemfile.lock")).to include("    bundler-multilock (#{Bundler::Multilock::VERSION})")
@@ -1184,6 +1186,29 @@ describe Bundler::Multilock do
     end
   end
 
+  it "allows an alternate lockfile to have additional sources" do
+    with_gemfile("") do
+      create_local_gem("git_gem")
+      Dir.chdir("git_gem") do
+        `git init -q && git add . && git -c user.email=spec@example.com -c user.name=spec commit -qm initial`
+      end
+      write_gemfile(<<~RUBY)
+        gem "concurrent-ruby", "1.2.2"
+
+        lockfile "alt" do
+          gem "git_gem", git: #{File.expand_path("git_gem").inspect}
+        end
+      RUBY
+      invoke_bundler("install")
+      expect(File.read("Gemfile.alt.lock")).to include("GIT\n")
+      expect(File.read("Gemfile.lock")).not_to include("GIT\n")
+
+      expect(invoke_bundler("install")).not_to include("Syncing")
+      expect(invoke_bundler("check")).not_to include("do not match")
+      expect(invoke_bundler("check", env: { "BUNDLE_LOCKFILE" => "alt" })).not_to include("do not match")
+    end
+  end
+
   it "fixes an alternate lockfile whose git source doesn't match the Gemfile's" do
     with_gemfile("") do
       create_local_gem("git_gem")
@@ -1202,7 +1227,8 @@ describe Bundler::Multilock do
       # the same repository, but written differently (which Bundler treats as a
       # different source, and hasn't checked out)
       replace_string("Gemfile.alt.lock", "remote: #{repo}\n", "remote: file://#{repo}\n")
-      expect { invoke_bundler("check") }.to raise_error(/You can attempt to fix by running `bundle install`/)
+      expect { invoke_bundler("check") }
+        .to raise_error(/The sources in Gemfile.alt.lock do not match Gemfile.\n  Only in Gemfile.alt.lock: file:/)
 
       invoke_bundler("install")
       expect(File.read("Gemfile.alt.lock")).to include("remote: #{repo}\n")

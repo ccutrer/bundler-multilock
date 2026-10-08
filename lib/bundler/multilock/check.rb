@@ -56,17 +56,28 @@ module Bundler
           # root needs to be set so that paths are output relative to the correct root in the lockfile
           Bundler.root = lockfile_definition[:gemfile].dirname
 
-          definition = Definition.build(lockfile_definition[:gemfile], lockfile_name, false)
-          next false unless definition.send(:current_platform_locked?)
+          lockfile_path = lockfile_name.relative_path_from(Dir.pwd)
+          gemfile_path = lockfile_definition[:gemfile].relative_path_from(Dir.pwd)
+
+          # (as the default lockfile, so that it isn't swapped for the active one)
+          definition = Bundler.with_default_lockfile(lockfile_name) do
+            Definition.build(lockfile_definition[:gemfile], lockfile_name, false)
+          end
+          unless definition.send(:current_platform_locked?)
+            next base_check_failed("#{lockfile_path} does not include the current platform " \
+                                   "(#{Bundler.local_platform}).")
+          end
           # the lockfile's sources don't match the Gemfile's (like a different
           # git remote); also, resolving would try to fetch the new source
-          next false if definition.instance_variable_get(:@source_changes)
+          if definition.instance_variable_get(:@source_changes)
+            next base_check_failed(source_changes_message(definition, lockfile_path, gemfile_path))
+          end
 
           begin
             definition.validate_runtime!
             not_installed = @check_installed ? Bundler.ui.silence { definition.missing_specs } : []
-          rescue RubyVersionMismatch, GemNotFound, SolveFailure, GitError
-            next false
+          rescue RubyVersionMismatch, GemNotFound, SolveFailure, GitError => e
+            next base_check_failed("Could not check #{lockfile_path}: #{e.message}")
           end
 
           if Bundler.ui.error?
@@ -78,10 +89,17 @@ module Bundler
           next false unless not_installed.empty?
           # without checking installed gems, nothing above notices a dependency
           # that was added to the Gemfile but isn't locked yet
-          next false unless @check_installed || definition.no_resolve_needed?
+          unless @check_installed || definition.no_resolve_needed?
+            next base_check_failed("#{lockfile_path} is out of date, because #{definition.send(:change_reason)}.")
+          end
+
           # (and even when checking installed gems, a dependency like a path gem
           # or plugin can be "installed" without being locked)
-          next false unless (definition.dependencies.map(&:name) - definition.locked_gems.dependencies.keys).empty?
+          unlocked = definition.dependencies.map(&:name) - definition.locked_gems.dependencies.keys
+          unless unlocked.empty?
+            next base_check_failed("#{lockfile_path} is missing dependencies from #{gemfile_path}: " \
+                                   "#{unlocked.join(", ")}.")
+          end
 
           # cache a sentinel so that we can share a cache regardless of the check_missing_deps argument
           next :missing_deps unless (definition.locked_gems.dependencies.values - definition.dependencies).empty?
@@ -95,6 +113,24 @@ module Bundler
       ensure
         Multilock.prepare_block = nil
         Bundler.root = default_root
+      end
+
+      # @return [false]
+      def base_check_failed(message) # rubocop:disable Naming/PredicateMethod -- not a predicate
+        Bundler.ui.error(message)
+        false
+      end
+
+      def source_changes_message(definition, lockfile_path, gemfile_path)
+        locked = definition.locked_gems.sources
+        current = definition.send(:sources).lock_sources
+        only_locked = locked.reject { |source| current.include?(source) }
+        only_current = current.reject { |source| locked.include?(source) }
+
+        message = "The sources in #{lockfile_path} do not match #{gemfile_path}."
+        message << "\n  Only in #{lockfile_path}: #{only_locked.join(", ")}" unless only_locked.empty?
+        message << "\n  Only in #{gemfile_path}: #{only_current.join(", ")}" unless only_current.empty?
+        message
       end
 
       # checks that every gem has a checksum, and that gems in common (same version
