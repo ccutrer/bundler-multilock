@@ -1184,6 +1184,32 @@ describe Bundler::Multilock do
     end
   end
 
+  it "fixes an alternate lockfile whose git source doesn't match the Gemfile's" do
+    with_gemfile("") do
+      create_local_gem("git_gem")
+      Dir.chdir("git_gem") do
+        `git init -q && git add . && git -c user.email=spec@example.com -c user.name=spec commit -qm initial`
+      end
+      repo = File.expand_path("git_gem")
+      write_gemfile(<<~RUBY)
+        gem "git_gem", git: #{repo.inspect}
+
+        lockfile "alt" do
+        end
+      RUBY
+      invoke_bundler("install")
+
+      # the same repository, but written differently (which Bundler treats as a
+      # different source, and hasn't checked out)
+      replace_string("Gemfile.alt.lock", "remote: #{repo}\n", "remote: file://#{repo}\n")
+      expect { invoke_bundler("check") }.to raise_error(/You can attempt to fix by running `bundle install`/)
+
+      invoke_bundler("install")
+      expect(File.read("Gemfile.alt.lock")).to include("remote: #{repo}\n")
+      invoke_bundler("check")
+    end
+  end
+
   it "syncs git sources that have updated" do
     with_gemfile(<<~RUBY) do
       gem "rspecq", github: "instructure/rspecq"

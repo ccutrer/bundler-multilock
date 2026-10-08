@@ -58,11 +58,14 @@ module Bundler
 
           definition = Definition.build(lockfile_definition[:gemfile], lockfile_name, false)
           next false unless definition.send(:current_platform_locked?)
+          # the lockfile's sources don't match the Gemfile's (like a different
+          # git remote); also, resolving would try to fetch the new source
+          next false if definition.instance_variable_get(:@source_changes)
 
           begin
             definition.validate_runtime!
             not_installed = @check_installed ? Bundler.ui.silence { definition.missing_specs } : []
-          rescue RubyVersionMismatch, GemNotFound, SolveFailure
+          rescue RubyVersionMismatch, GemNotFound, SolveFailure, GitError
             next false
           end
 
