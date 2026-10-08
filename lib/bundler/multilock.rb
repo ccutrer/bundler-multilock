@@ -460,6 +460,16 @@ module Bundler
         end
       end
 
+      # Resolves with only local gems. Bundler warns that scoped sources don't
+      # implement a dependency API when they're restricted to local gems, but
+      # that's expected here; if this fails, we resolve remotely instead.
+      def resolve_locally(definition)
+        definition.define_singleton_method(:non_dependency_api_warning) { nil }
+        definition.resolve_with_cache!
+      ensure
+        definition.singleton_class.remove_method(:non_dependency_api_warning)
+      end
+
       # @return [true, false] if running with `--local`, so nothing should be fetched
       def local_only?
         return false unless defined?(CLI) && CLI.respond_to?(:instance)
@@ -523,7 +533,7 @@ module Bundler
             # if something has changed, we skip this step; it's unlocking anyway
             next unless current_definition.no_resolve_needed?
 
-            current_definition.resolve_with_cache!
+            resolve_locally(current_definition)
             if current_definition.missing_specs.any?
               cache.invalidate_checks(current_lockfile)
               Bundler.with_default_lockfile(current_lockfile) do
@@ -560,7 +570,7 @@ module Bundler
 
               spec.source.specs << spec
             end
-            definition.resolve_with_cache!
+            resolve_locally(definition)
             missing_checksums = fill_checksums(definition, lockfile_definition[:parent], cache)
             # fetch checksums that aren't available locally
             raise SolveFailure unless missing_checksums.empty? || local_only?

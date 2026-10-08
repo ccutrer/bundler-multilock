@@ -850,6 +850,29 @@ describe Bundler::Multilock do
     end
   end
 
+  it "doesn't warn about scoped sources when syncing" do
+    with_gemfile(<<~RUBY) do
+      source "https://gem.coop" do
+        gem "rake", "13.2.1"
+      end
+
+      lockfile do
+        gem "concurrent-ruby", "1.2.2"
+      end
+
+      lockfile "alt" do
+        gem "concurrent-ruby", "1.3.4"
+      end
+    RUBY
+      expect(invoke_bundler("install")).not_to include("dependency API")
+
+      replace_string("Gemfile", '"1.3.4"', '"1.3.5"')
+      output = invoke_bundler("install")
+      expect(output).to include("Syncing to Gemfile.alt.lock")
+      expect(output).not_to include("dependency API")
+    end
+  end
+
   it "updates bundler version in secondary lockfiles" do
     with_gemfile(<<~RUBY) do
       gem "rake"
