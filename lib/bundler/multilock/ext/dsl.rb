@@ -74,6 +74,31 @@ module Bundler
           @gemfile = original_gemfile
         end
 
+        # Significant changes:
+        #  * in a Gemfile we switched to (see #allow_duplicate_plugins_in), don't
+        #    warn the first time a plugin that's already declared is declared again
+        def plugin(name, *args)
+          unless @duplicate_plugins_gemfile &&
+                 @gemfile == @duplicate_plugins_gemfile &&
+                 !@allowed_duplicate_plugins.include?(name) &&
+                 @dependencies.any? { |dependency| dependency.name == name }
+            return super
+          end
+
+          @allowed_duplicate_plugins << name
+          # Bundler only warns about it (instead of raising) if the version
+          # requirements and the source match exactly
+          Bundler.ui.silence { super }
+        end
+
+        # @!visibility private
+        # Allows plugins to be declared again, once each, in the given Gemfile,
+        # without Bundler warning that they're listed more than once
+        def allow_duplicate_plugins_in(gemfile)
+          @duplicate_plugins_gemfile = Pathname.new(gemfile).expand_path
+          @allowed_duplicate_plugins = Set.new
+        end
+
         def lockfile(*, **, &)
           return true if Multilock.loaded?
 

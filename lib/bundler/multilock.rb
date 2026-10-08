@@ -98,6 +98,8 @@ module Bundler
             Bundler.root = Bundler.default_gemfile.dirname
             Bundler.default_lockfile = lockfile
 
+            # that Gemfile should declare its plugins too, but they may already be declared
+            builder.allow_duplicate_plugins_in(Bundler.default_gemfile)
             builder.eval_gemfile(Bundler.default_gemfile)
 
             return false

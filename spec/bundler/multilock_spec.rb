@@ -232,6 +232,94 @@ describe Bundler::Multilock do
     end
   end
 
+  it "doesn't add plugins from the main Gemfile to the lockfiles of other Gemfiles" do
+    with_gemfile(<<~RUBY) do
+      lockfile("other/Gemfile.lock", gemfile: "other/Gemfile")
+    RUBY
+      FileUtils.mkdir_p("other")
+      File.write("other/Gemfile", <<~RUBY)
+        source "https://rubygems.org"
+
+        gem "rake", "13.2.1"
+      RUBY
+
+      invoke_bundler("install")
+
+      expect(File.read("Gemfile.lock")).to include("bundler-multilock")
+      expect(File.read("other/Gemfile.lock")).not_to include("bundler-multilock")
+      invoke_bundler("check")
+    end
+  end
+
+  it "doesn't warn about plugins being listed twice when another Gemfile declares them too" do
+    with_gemfile("") do
+      create_local_gem("dummy-plugin", 'spec.files = ["plugins.rb"]')
+      File.write("dummy-plugin/plugins.rb", "# does nothing\n")
+      dummy_plugin = %(plugin "dummy-plugin", path: #{File.expand_path("dummy-plugin").inspect})
+      write_gemfile(<<~RUBY)
+        #{dummy_plugin}
+
+        lockfile("other/Gemfile.lock", gemfile: "other/Gemfile")
+      RUBY
+      FileUtils.mkdir_p("other")
+      other_gemfile = <<~RUBY
+        source "https://rubygems.org"
+
+        plugin "bundler-multilock", "#{plugin_requirement}", path: #{plugin_path.inspect}
+        #{dummy_plugin}
+        return unless Plugin.loaded?("bundler-multilock")
+
+        gem "rake", "13.2.1"
+      RUBY
+      File.write("other/Gemfile", other_gemfile)
+      invoke_bundler("install")
+
+      env = { "BUNDLE_LOCKFILE" => "other/Gemfile.lock" }
+      expect(invoke_bundler("list", env:)).not_to include("more than once")
+      expect(File.read("other/Gemfile.lock"))
+        .to include("    bundler-multilock (#{Bundler::Multilock::VERSION})", "    dummy-plugin (0.0.1)")
+
+      # it still warns if that Gemfile declares one of them a second time
+      File.write("other/Gemfile", other_gemfile.sub(%(gem "rake"), %(#{dummy_plugin}\ngem "rake")))
+      expect(invoke_bundler("list", env:)).to include("lists the gem dummy-plugin (>= 0) more than once")
+
+      # and it still fails if the declarations don't match exactly
+      File.write("other/Gemfile", other_gemfile.sub(dummy_plugin, dummy_plugin.sub("path:", %("= 0.0.1", path:))))
+      expect { invoke_bundler("list", env:) }
+        .to raise_error(/cannot specify the same gem twice with different version requirements/)
+    end
+  end
+
+  it "syncs a plugin declared in both Gemfiles to the other Gemfile's lockfile" do
+    with_gemfile(<<~RUBY) do
+      lockfile("other/Gemfile.lock", gemfile: "other/Gemfile")
+    RUBY
+      FileUtils.mkdir_p("other")
+      File.write("other/Gemfile", <<~RUBY)
+        source "https://rubygems.org"
+
+        plugin "bundler-multilock", "#{plugin_requirement}", path: #{plugin_path.inspect}
+        return unless Plugin.loaded?("bundler-multilock")
+
+        gem "rake", "13.2.1"
+      RUBY
+      invoke_bundler("install")
+      expect(File.read("other/Gemfile.lock")).to include("    bundler-multilock (#{Bundler::Multilock::VERSION})")
+
+      # as if the other Gemfile's lockfile was created before it declared the plugin
+      lockfile = File.read("other/Gemfile.lock")
+                     .sub(/^PATH\n  remote: [^\n]*\n  specs:\n    bundler-multilock .*?\n\n/m, "")
+                     .gsub(/^  bundler-multilock .*\n/, "")
+      File.write("other/Gemfile.lock", lockfile)
+      expect(File.read("other/Gemfile.lock")).not_to include("bundler-multilock")
+      expect { invoke_bundler("check") }.to raise_error(/bundle install/)
+
+      invoke_bundler("install")
+      expect(File.read("other/Gemfile.lock")).to include("    bundler-multilock (#{Bundler::Multilock::VERSION})")
+      invoke_bundler("check")
+    end
+  end
+
   it "maintains consistency across local gem's lockfiless when one is included in the other" do
     with_gemfile(<<~RUBY) do
       lockfile("local_test/Gemfile.lock",

@@ -76,6 +76,9 @@ module Bundler
           # without checking installed gems, nothing above notices a dependency
           # that was added to the Gemfile but isn't locked yet
           next false unless @check_installed || definition.no_resolve_needed?
+          # (and even when checking installed gems, a dependency like a path gem
+          # or plugin can be "installed" without being locked)
+          next false unless (definition.dependencies.map(&:name) - definition.locked_gems.dependencies.keys).empty?
 
           # cache a sentinel so that we can share a cache regardless of the check_missing_deps argument
           next :missing_deps unless (definition.locked_gems.dependencies.values - definition.dependencies).empty?
