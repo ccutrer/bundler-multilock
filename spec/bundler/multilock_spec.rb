@@ -591,15 +591,16 @@ describe Bundler::Multilock do
     RUBY
       invoke_bundler("install")
 
-      invoke_bundler("lock --add-platform java")
+      # (a platform that isn't the current one, which can't be removed)
+      invoke_bundler("lock --add-platform x64-mingw-ucrt")
 
       invoke_bundler("install")
-      expect(File.read("Gemfile.full.lock")).to include("java")
+      expect(File.read("Gemfile.full.lock")).to include("x64-mingw-ucrt")
 
-      invoke_bundler("lock --remove-platform java")
+      invoke_bundler("lock --remove-platform x64-mingw-ucrt")
 
       invoke_bundler("install")
-      expect(File.read("Gemfile.full.lock")).not_to include("java")
+      expect(File.read("Gemfile.full.lock")).not_to include("x64-mingw-ucrt")
     end
   end
 
@@ -1068,6 +1069,8 @@ describe Bundler::Multilock do
   end
 
   it "syncs gems whose platforms changed slightly" do
+    skip "sqlite3 is a C extension, which JRuby can't build" if RUBY_ENGINE == "jruby"
+
     with_gemfile(<<~RUBY) do
       gem "sqlite3", "~> 1.7"
 

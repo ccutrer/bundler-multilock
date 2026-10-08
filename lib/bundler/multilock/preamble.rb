@@ -139,12 +139,31 @@ module Bundler
         # @yieldparam match [MatchData]
         def gsub_code!(source, pattern, keyword)
           non_code = non_code_ranges(source)
-          source.gsub!(pattern) do |match|
-            match_data = Regexp.last_match
-            offset = match_data.byteoffset(0).first + match.b.index(keyword)
-            next match if non_code.any? { |range| range.cover?(offset) }
+          result = +""
+          copied_until = 0
+          replaced = false
+          each_match(source, pattern) do |match|
+            offset = match.pre_match.bytesize + match[0].b.index(keyword)
+            next if non_code.any? { |range| range.cover?(offset) }
 
-            yield match_data
+            result << source[copied_until...match.begin(0)] << yield(match)
+            copied_until = match.end(0)
+            replaced = true
+          end
+          return unless replaced
+
+          source.replace(result << source[copied_until..])
+        end
+
+        # Yields each match of pattern in source
+        #
+        # @yieldparam match [MatchData]
+        def each_match(source, pattern)
+          position = 0
+          while (match = pattern.match(source, position))
+            yield match
+            # (always move forward, even after an empty match)
+            position = [match.end(0), match.begin(0) + 1].max
           end
         end
 
@@ -156,10 +175,12 @@ module Bundler
         # @return [Array<Integer>] the byte offsets of matches that aren't in a string, heredoc, or comment
         def code_match_offsets(source, pattern)
           non_code = non_code_ranges(source)
-          source.to_enum(:scan, pattern).filter_map do
-            offset = Regexp.last_match.byteoffset(0).first
-            offset if non_code.none? { |range| range.cover?(offset) }
+          offsets = []
+          each_match(source, pattern) do |match|
+            offset = match.pre_match.bytesize
+            offsets << offset if non_code.none? { |range| range.cover?(offset) }
           end
+          offsets
         end
 
         # Inserts text on the line after the first statement (in code) matching pattern

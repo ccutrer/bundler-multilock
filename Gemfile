@@ -6,7 +6,7 @@ source "https://rubygems.org"
 plugin "bundler-multilock", path: "."
 return unless Plugin.loaded?("bundler-multilock")
 
-gem "debug", "~> 1.10", require: false
+gem "debug", "~> 1.10", require: false, platforms: :mri
 gem "gem-release", "~> 2.2", require: false
 gem "rake", "~> 13.2", require: false
 gem "rspec", "~> 3.13", require: false

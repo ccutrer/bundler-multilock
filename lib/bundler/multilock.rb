@@ -78,8 +78,8 @@ module Bundler
         # If they're using BUNDLE_LOCKFILE, then they really do want to
         # use a particular lockfile, and it overrides whatever they
         # dynamically set in their gemfile
-        if env_lockfile_names.empty? && defined?(CLI) &&
-           %i[check install lock update].include?(CLI.instance&.current_command_chain&.first)
+        if env_lockfile_names.empty? &&
+           %i[check install lock update].include?(cli&.current_command_chain&.first)
           # always use Gemfile.lock for `bundle check`, `bundle install`,
           # `bundle lock`, and `bundle update`.
           active = lockfile == Bundler.default_lockfile(force_original: true)
@@ -384,6 +384,21 @@ module Bundler
       end
 
       # @!visibility private
+      # @return [Bundler::CLI, nil] the bundler command that's running, if any
+      def cli
+        # Bundler autoloads its CLI, so it's only running if it's already loaded
+        # (and checking that the constant is defined doesn't tell us that)
+        return unless cli_loaded? && CLI.respond_to?(:instance)
+
+        CLI.instance
+      end
+
+      # @!visibility private
+      def cli_loaded?
+        Bundler.autoload?(:CLI).nil? && !defined?(Bundler::CLI).nil?
+      end
+
+      # @!visibility private
       def reset!
         @lockfile_definitions = {}
         @loaded = false
@@ -472,9 +487,7 @@ module Bundler
 
       # @return [true, false] if running with `--local`, so nothing should be fetched
       def local_only?
-        return false unless defined?(CLI) && CLI.respond_to?(:instance)
-
-        CLI.instance&.options&.[]("local") ? true : false
+        cli&.options&.[]("local") ? true : false
       end
 
       def write_lockfile(lockfile_definition,
@@ -624,7 +637,7 @@ end
 
 Bundler::Multilock::Preamble.inject unless Bundler::Multilock.loaded?
 
-if defined?(Bundler::CLI)
+if Bundler::Multilock.cli_loaded?
   require_relative "multilock/ext/cli"
 
   # this is terrible, but we can't prepend into these modules because we only load

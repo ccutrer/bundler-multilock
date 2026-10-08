@@ -130,7 +130,7 @@ module MultilockHelpers
 
   # The directory gems are installed into after calling {#use_local_bundle_path}
   def local_gem_dir
-    "vendor/bundle/ruby/#{RbConfig::CONFIG["ruby_version"]}"
+    "vendor/bundle/#{Bundler.ruby_scope}"
   end
 
   # Installs a gem (and its dependencies) into {#local_gem_dir}

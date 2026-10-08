@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-require "debug"
+require "debug" if RUBY_ENGINE == "ruby"
 
 require_relative "support/helpers"
 

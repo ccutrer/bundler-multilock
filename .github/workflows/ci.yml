@@ -13,11 +13,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ruby-version: [3.2, 3.3, 3.4, "4.0"]
+        ruby-version: [3.2, 3.3, 3.4, "4.0", "jruby-10.0", "jruby-10.1"]
         bundler-version: [4.1.0.beta1]
     env:
       BUNDLER_VERSION: ${{ matrix.bundler-version }}
       BUNDLE_LOCKFILE: active
+      # faster startup for the many short-lived bundler processes the specs run
+      JRUBY_OPTS: --dev
     steps:
       - uses: actions/checkout@v4
       - name: Set up Ruby
